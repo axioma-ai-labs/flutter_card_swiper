@@ -47,7 +47,9 @@ class _CardSwiperState<T extends Widget> extends State<CardSwiper>
       initialScale: widget.scale,
       allowedSwipeDirection: widget.allowedSwipeDirection,
       initialOffset: widget.backCardOffset,
+      defaultDuration: widget.duration,
       onSwipeDirectionChanged: onSwipeDirectionChanged,
+      preventInitialDownwardSwipe: widget.preventInitialDownwardSwipe,
     );
   }
 
@@ -166,7 +168,7 @@ class _CardSwiperState<T extends Widget> extends State<CardSwiper>
         onPanEnd: (tapInfo) {
           if (_canSwipe) {
             _tappedOnTop = false;
-            _onEndAnimation();
+            _onEndAnimation(tapInfo.velocity.pixelsPerSecond);
           }
         },
       ),
@@ -218,6 +220,10 @@ class _CardSwiperState<T extends Widget> extends State<CardSwiper>
       switch (_swipeType) {
         case SwipeType.swipe:
           await _handleCompleteSwipe();
+        case SwipeType.back:
+        case SwipeType.undo:
+          // Sync final animation values to ensure smooth return to initial position
+          setState(_cardAnimation.sync);
         default:
           break;
       }
@@ -228,13 +234,6 @@ class _CardSwiperState<T extends Widget> extends State<CardSwiper>
 
   Future<void> _handleCompleteSwipe() async {
     final isLastCard = _currentIndex! == widget.cardsCount - 1;
-    final shouldCancelSwipe = await widget.onSwipe
-            ?.call(_currentIndex!, _nextIndex, _detectedDirection) ==
-        false;
-
-    if (shouldCancelSwipe) {
-      return;
-    }
 
     _undoableIndex.state = _nextIndex;
     _directionHistory.add(_detectedDirection);
@@ -257,14 +256,26 @@ class _CardSwiperState<T extends Widget> extends State<CardSwiper>
     });
   }
 
-  void _onEndAnimation() {
+  Future<void> _onEndAnimation(Offset velocity) async {
     final direction = _getEndAnimationDirection();
     final isValidDirection = _isValidDirection(direction);
 
     if (isValidDirection) {
+      // Check onSwipe callback BEFORE starting swipe animation
+      _detectedDirection = direction;
+      final shouldCancelSwipe =
+          await widget.onSwipe?.call(_currentIndex!, _nextIndex, direction) ==
+              false;
+
+      if (shouldCancelSwipe) {
+        // If cancelled, just animate back without flying away
+        _goBack(velocity);
+        return;
+      }
+
       _swipe(direction);
     } else {
-      _goBack();
+      _goBack(velocity);
     }
   }
 
@@ -299,9 +310,9 @@ class _CardSwiperState<T extends Widget> extends State<CardSwiper>
     _cardAnimation.animate(context, direction);
   }
 
-  void _goBack() {
+  void _goBack(Offset velocity) {
     _swipeType = SwipeType.back;
-    _cardAnimation.animateBack(context);
+    _cardAnimation.animateBack(context, velocity);
   }
 
   void _undo() {

@@ -136,6 +136,11 @@ class CardSwiper extends StatefulWidget {
   /// Defaults to 50.0.
   final double undoSwipeThreshold;
 
+  /// If true, prevents starting a swipe in the downward direction.
+  /// The card can still move down when returning from an upward swipe.
+  /// Defaults to false.
+  final bool preventInitialDownwardSwipe;
+
   const CardSwiper({
     required this.cardBuilder,
     required this.cardsCount,
@@ -159,6 +164,7 @@ class CardSwiper extends StatefulWidget {
     this.undoDirection = UndoDirection.left,
     this.showBackCardOnUndo = false,
     this.undoSwipeThreshold = 50.0,
+    this.preventInitialDownwardSwipe = false,
     super.key,
   })  : assert(
           maxAngle >= 0 && maxAngle <= 360,

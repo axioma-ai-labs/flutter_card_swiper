@@ -47,6 +47,7 @@ class _ExamplePageState extends State<Example> {
                 numberOfCardsDisplayed: 3,
                 backCardOffset: const Offset(40, 40),
                 padding: const EdgeInsets.all(24.0),
+                preventInitialDownwardSwipe: true,
                 cardBuilder: (
                   context,
                   index,
@@ -97,6 +98,10 @@ class _ExamplePageState extends State<Example> {
     int? currentIndex,
     CardSwiperDirection direction,
   ) {
+    if (direction.isVertical) {
+      return false;
+    }
+
     debugPrint(
       'The card $previousIndex was swiped to the ${direction.name}. Now the card $currentIndex is on top',
     );
