@@ -234,6 +234,13 @@ class _CardSwiperState<T extends Widget> extends State<CardSwiper>
 
   Future<void> _handleCompleteSwipe() async {
     final isLastCard = _currentIndex! == widget.cardsCount - 1;
+    final shouldCancelSwipe = await widget.onSwipe
+            ?.call(_currentIndex!, _nextIndex, _detectedDirection) ==
+        false;
+
+    if (shouldCancelSwipe) {
+      return;
+    }
 
     _undoableIndex.state = _nextIndex;
     _directionHistory.add(_detectedDirection);
