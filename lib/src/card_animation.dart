@@ -11,10 +11,12 @@ class CardAnimation {
     required this.initialScale,
     required this.initialOffset,
     required this.defaultDuration,
+    required this.commitThreshold,
     this.isHorizontalSwipingEnabled = true,
     this.isVerticalSwipingEnabled = true,
     this.allowedSwipeDirection = const AllowedSwipeDirection.all(),
     this.onSwipeDirectionChanged,
+    this.onFirstAxisDecided,
     this.preventInitialDownwardSwipe = false,
   }) : scale = initialScale;
 
@@ -29,6 +31,17 @@ class CardAnimation {
   final ValueChanged<CardSwiperDirection>? onSwipeDirectionChanged;
   final bool preventInitialDownwardSwipe;
 
+  /// The commit threshold in pixels (mirrors `CardSwiper.threshold`). Used to
+  /// decide when vertical resistance should taper off: once `|left|` is past
+  /// the commit threshold we're effectively in "horizontal wins" territory
+  /// and the vertical axis becomes purely cosmetic (1:1 with the finger).
+  final double commitThreshold;
+
+  /// Fires the first time the gesture commits to a primary axis. `true` =
+  /// vertical, `false` = horizontal. Resets to `null` between gestures (via
+  /// [reset]); hosts that care about the slop-window state can mirror this.
+  final ValueChanged<bool?>? onFirstAxisDecided;
+
   double left = 0;
   double top = 0;
   double total = 0;
@@ -36,12 +49,14 @@ class CardAnimation {
   double scale;
   Offset difference = Offset.zero;
 
-  bool? _isVerticalSwipe; // null = not determined yet
+  bool? _firstAxisIsVertical; // null = not yet decided (inside slop window)
   double _cumulativeDx = 0;
   double _cumulativeDy = 0;
   static const double _directionLockThreshold = 18.0; // kTouchSlop
-  static const double _verticalResistanceViewport =
-      800.0; // virtual height for resistance calc (higher = softer)
+  // Virtual height for vertical resistance. Lower = resistance grows faster.
+  // Chosen so reaching a 100 px vertical offset takes ~200 px of finger
+  // travel (friction ~0.52 at rest), matching the pre-existing pull-up feel.
+  static const double _verticalResistanceViewport = 450.0;
 
   late Animation<double> _leftAnimation;
   late Animation<double> _topAnimation;
@@ -50,6 +65,12 @@ class CardAnimation {
   late Animation<Offset> _differenceAnimation;
 
   double get _maxAngleInRadian => maxAngle * (math.pi / 180);
+
+  /// `true` once the gesture has committed to vertical, `false` once
+  /// committed to horizontal, `null` while still inside the pre-lock slop
+  /// window. Hosts use this to gate UI (e.g. an "ask bro" warm-up that
+  /// should only show when vertical was the user's first move).
+  bool? get firstAxisIsVertical => _firstAxisIsVertical;
 
   void sync() {
     left = _leftAnimation.value;
@@ -68,86 +89,106 @@ class CardAnimation {
     angle = 0;
     scale = initialScale;
     difference = Offset.zero;
-    _isVerticalSwipe = null;
+    if (_firstAxisIsVertical != null) {
+      _firstAxisIsVertical = null;
+      onFirstAxisDecided?.call(null);
+    }
     _cumulativeDx = 0;
     _cumulativeDy = 0;
   }
 
   void update(double dx, double dy, bool inverseAngle) {
-    // Accumulate deltas to determine direction (like Flutter's gesture arena)
+    // Accumulate deltas during the slop window to decide the gesture's
+    // primary axis. Once decided, the lock is sticky for the whole drag —
+    // but movement itself stays free 2D regardless of the lock.
     _cumulativeDx += dx.abs();
     _cumulativeDy += dy.abs();
 
-    // Determine direction once cumulative movement exceeds threshold
-    // Vertical zone is 20° on each side of vertical (70° from horizontal)
-    // tan(70°) ≈ 2.75
-    if (_isVerticalSwipe == null) {
-      final total = _cumulativeDx + _cumulativeDy;
-      if (total > _directionLockThreshold) {
-        _isVerticalSwipe = _cumulativeDy > _cumulativeDx * 2.75;
+    // Decide once: vertical zone is ~20° on each side of vertical
+    // (70° from horizontal), tan(70°) ≈ 2.75. Tutorial-style cards that
+    // disallow vertical fall back to horizontal so a small upward wrist
+    // arc on a horizontal swipe doesn't strand the gesture.
+    if (_firstAxisIsVertical == null) {
+      final cumulativeMagnitude = _cumulativeDx + _cumulativeDy;
+      if (cumulativeMagnitude > _directionLockThreshold) {
+        final verticalAllowed =
+            allowedSwipeDirection.up || allowedSwipeDirection.down;
+        final horizontalAllowed =
+            allowedSwipeDirection.left || allowedSwipeDirection.right;
+        final leansVertical = _cumulativeDy > _cumulativeDx * 2.75;
+        if (leansVertical && verticalAllowed) {
+          _firstAxisIsVertical = true;
+        } else if (horizontalAllowed) {
+          _firstAxisIsVertical = false;
+        } else if (verticalAllowed) {
+          _firstAxisIsVertical = true;
+        } else {
+          _firstAxisIsVertical = false;
+        }
+        onFirstAxisDecided?.call(_firstAxisIsVertical);
       }
     }
 
-    // Only allow horizontal movement if not locked to vertical
-    if (_isVerticalSwipe != true) {
-      if (allowedSwipeDirection.right && allowedSwipeDirection.left) {
-        if (left > 0) {
-          onSwipeDirectionChanged?.call(CardSwiperDirection.right);
-        } else if (left < 0) {
-          onSwipeDirectionChanged?.call(CardSwiperDirection.left);
-        }
+    // ── Horizontal axis ──
+    // Always tracks the finger 1:1 (subject to allowed directions). Even in
+    // first=vertical mode the user is free to drift sideways — that's how
+    // horizontal can "steal" the gesture from ask-bro.
+    if (allowedSwipeDirection.right && allowedSwipeDirection.left) {
+      if (left > 0) {
+        onSwipeDirectionChanged?.call(CardSwiperDirection.right);
+      } else if (left < 0) {
+        onSwipeDirectionChanged?.call(CardSwiperDirection.left);
+      }
+      left += dx;
+    } else if (allowedSwipeDirection.right) {
+      if (left >= 0) {
+        onSwipeDirectionChanged?.call(CardSwiperDirection.right);
         left += dx;
-      } else if (allowedSwipeDirection.right) {
-        if (left >= 0) {
-          onSwipeDirectionChanged?.call(CardSwiperDirection.right);
-          left += dx;
-        }
-      } else if (allowedSwipeDirection.left) {
-        if (left <= 0) {
-          onSwipeDirectionChanged?.call(CardSwiperDirection.left);
-          left += dx;
-        }
+      }
+    } else if (allowedSwipeDirection.left) {
+      if (left <= 0) {
+        onSwipeDirectionChanged?.call(CardSwiperDirection.left);
+        left += dx;
       }
     }
 
-    // Prevent initial downward swipe only for vertical swipes (horizontal swipes have full freedom)
-    final isVerticalOrUndetermined = _isVerticalSwipe ?? true;
+    // ── Vertical axis ──
+    // `preventInitialDownwardSwipe` only blocks once the gesture has
+    // committed to vertical; a horizontal-first card can still drift down.
     final blockDownward = preventInitialDownwardSwipe &&
-        isVerticalOrUndetermined &&
+        (_firstAxisIsVertical ?? true) &&
         top >= 0 &&
         dy > 0;
 
     if (!blockDownward) {
+      // Resistance applies only while the user is still "playing the
+      // vertical game" — i.e. they committed vertical AND horizontal hasn't
+      // taken over. Once horizontal crosses its commit threshold the
+      // vertical axis is purely cosmetic and follows the finger 1:1.
+      final applyResistance =
+          (_firstAxisIsVertical ?? false) && left.abs() < commitThreshold;
+
       if (allowedSwipeDirection.up && allowedSwipeDirection.down) {
         if (top > 0) {
           onSwipeDirectionChanged?.call(CardSwiperDirection.bottom);
         } else if (top < 0) {
           onSwipeDirectionChanged?.call(CardSwiperDirection.top);
         }
-        // Apply resistance only for vertical swipes, free movement for horizontal
-        if (_isVerticalSwipe ?? false) {
-          top = _applyVerticalResistance(top, dy);
-        } else {
-          top += dy;
-        }
+        top = applyResistance ? _applyVerticalResistance(top, dy) : top + dy;
       } else if (allowedSwipeDirection.up) {
         if (top <= 0) {
           onSwipeDirectionChanged?.call(CardSwiperDirection.top);
-          if (_isVerticalSwipe ?? false) {
-            top = _applyVerticalResistance(top, dy);
-          } else {
-            top += dy;
-          }
+          top = applyResistance ? _applyVerticalResistance(top, dy) : top + dy;
         }
       } else if (allowedSwipeDirection.down) {
         if (top >= 0) {
           onSwipeDirectionChanged?.call(CardSwiperDirection.bottom);
-          if (_isVerticalSwipe ?? false) {
-            top = _applyVerticalResistance(top, dy);
-          } else {
-            top += dy;
-          }
+          top = applyResistance ? _applyVerticalResistance(top, dy) : top + dy;
         }
+      } else {
+        // Vertical disallowed entirely (e.g. tutorial cards) — freeze top.
+        // Without this branch the card would drift vertically with diagonal
+        // drags even though no vertical commit is possible.
       }
     }
 
@@ -159,13 +200,12 @@ class CardAnimation {
 
   /// Apply iOS-like overscroll resistance to vertical movement
   double _applyVerticalResistance(double currentTop, double dy) {
-    final double overscrollPast = currentTop.abs();
-    final double overscrollFraction =
+    final overscrollPast = currentTop.abs();
+    final overscrollFraction =
         (overscrollPast / _verticalResistanceViewport).clamp(0.0, 1.0);
 
     // Friction increases as you drag further (like BouncingScrollPhysics)
-    final double friction =
-        math.max(0.05, 0.52 * math.pow(1 - overscrollFraction, 2));
+    final friction = math.max(0.05, 0.52 * math.pow(1 - overscrollFraction, 2));
 
     return currentTop + dy * friction;
   }

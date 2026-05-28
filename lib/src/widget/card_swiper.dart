@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_card_swiper/flutter_card_swiper.dart';
 import 'package:flutter_card_swiper/src/card_animation.dart';
@@ -56,6 +57,17 @@ class CardSwiper extends StatefulWidget {
   ///
   /// Must be between 1 and 100 percent of the card width. Defaults to 50 percent.
   final int threshold;
+
+  /// Pixel threshold for the **vertical** commit. Defaults to [threshold]
+  /// (parity with horizontal). Hosts that want a different commit distance
+  /// on the vertical axis — e.g. a "send to chat" action that should fire
+  /// after a shorter pull, since the resistance makes vertical travel cost
+  /// more finger movement — set this lower than [threshold].
+  ///
+  /// `cardBuilder`'s `verticalOffsetPercentage` is normalized by this value
+  /// (so the percentage hits -100 right at the commit boundary, regardless
+  /// of the absolute pixel value).
+  final int verticalCommitThreshold;
 
   /// The scale of the card that is behind the front card.
   ///
@@ -141,6 +153,25 @@ class CardSwiper extends StatefulWidget {
   /// Defaults to false.
   final bool preventInitialDownwardSwipe;
 
+  /// Fires when the gesture commits to its primary axis. `true` = vertical,
+  /// `false` = horizontal, `null` = pre-decision / between gestures.
+  ///
+  /// Hosts use this for visuals that depend on what the gesture *means*
+  /// (e.g. suppress a vertical action button when the user started a
+  /// horizontal swipe), where the offsets alone aren't enough because the
+  /// card moves freely on both axes.
+  final ValueChanged<bool?>? onFirstAxisDecided;
+
+  /// Optional widget rendered in the card stack **between** the back cards
+  /// and the front card. It stays anchored to the stack while the front
+  /// card translates freely on top of it — useful for "what would happen
+  /// on commit" overlays that should not move with the card.
+  ///
+  /// At rest the front card covers it completely; as the front card moves
+  /// (up, sideways, anywhere), the corresponding area of the layer is
+  /// revealed. Sized to fill the stack via `StackFit.expand`.
+  final Widget? intermediateLayer;
+
   const CardSwiper({
     required this.cardBuilder,
     required this.cardsCount,
@@ -150,6 +181,7 @@ class CardSwiper extends StatefulWidget {
     this.duration = const Duration(milliseconds: 200),
     this.maxAngle = 30,
     this.threshold = 50,
+    int? verticalCommitThreshold,
     this.scale = 0.9,
     this.isDisabled = false,
     this.onTapDisabled,
@@ -165,14 +197,21 @@ class CardSwiper extends StatefulWidget {
     this.showBackCardOnUndo = false,
     this.undoSwipeThreshold = 50.0,
     this.preventInitialDownwardSwipe = false,
+    this.onFirstAxisDecided,
+    this.intermediateLayer,
     super.key,
-  })  : assert(
+  })  : verticalCommitThreshold = verticalCommitThreshold ?? threshold,
+        assert(
           maxAngle >= 0 && maxAngle <= 360,
           'maxAngle must be between 0 and 360',
         ),
         assert(
           threshold >= 1 && threshold <= 100,
           'threshold must be between 1 and 100',
+        ),
+        assert(
+          (verticalCommitThreshold ?? threshold) >= 1,
+          'verticalCommitThreshold must be a positive value',
         ),
         assert(
           scale >= 0 && scale <= 1,

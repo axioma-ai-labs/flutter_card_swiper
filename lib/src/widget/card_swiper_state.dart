@@ -48,7 +48,9 @@ class _CardSwiperState<T extends Widget> extends State<CardSwiper>
       allowedSwipeDirection: widget.allowedSwipeDirection,
       initialOffset: widget.backCardOffset,
       defaultDuration: widget.duration,
+      commitThreshold: widget.threshold.toDouble(),
       onSwipeDirectionChanged: onSwipeDirectionChanged,
+      onFirstAxisDecided: widget.onFirstAxisDecided,
       preventInitialDownwardSwipe: widget.preventInitialDownwardSwipe,
     );
   }
@@ -93,13 +95,23 @@ class _CardSwiperState<T extends Widget> extends State<CardSwiper>
           padding: widget.padding,
           child: LayoutBuilder(
             builder: (BuildContext context, BoxConstraints constraints) {
+              final cards = numberOfCardsOnScreen();
               return Stack(
                 clipBehavior: Clip.none,
                 fit: StackFit.expand,
-                children: List.generate(numberOfCardsOnScreen(), (index) {
-                  if (index == 0) return _frontItem(constraints);
-                  return _backItem(constraints, index);
-                }).reversed.toList(),
+                children: <Widget>[
+                  // Back cards drawn first (furthest from the user).
+                  for (int i = cards - 1; i >= 1; i--)
+                    _backItem(constraints, i),
+                  // Optional intermediate layer — sits in the stack BETWEEN
+                  // the back cards and the front card. Used by hosts to
+                  // surface "what would happen on commit" overlays that
+                  // need to stay anchored while the front card moves.
+                  if (cards > 0 && widget.intermediateLayer != null)
+                    widget.intermediateLayer!,
+                  // Front card last so it draws on top of everything.
+                  if (cards > 0) _frontItem(constraints),
+                ],
               );
             },
           ),
@@ -121,7 +133,7 @@ class _CardSwiperState<T extends Widget> extends State<CardSwiper>
               context,
               _currentIndex!,
               (100 * _cardAnimation.left / widget.threshold).ceil(),
-              (100 * _cardAnimation.top / widget.threshold).ceil(),
+              (100 * _cardAnimation.top / widget.verticalCommitThreshold).ceil(),
             ),
           ),
         ),
@@ -206,7 +218,32 @@ class _CardSwiperState<T extends Widget> extends State<CardSwiper>
       ControllerSwipeEvent(:final direction) => _swipe(direction),
       ControllerUndoEvent() => _undo(),
       ControllerMoveEvent(:final index) => _moveTo(index),
+      ControllerInjectVerticalDragUpdate(:final dy) =>
+        _onInjectedVerticalDragUpdate(dy),
+      ControllerInjectVerticalDragEnd(:final velocity) =>
+        _onInjectedVerticalDragEnd(velocity),
     };
+  }
+
+  void _onInjectedVerticalDragUpdate(double dy) {
+    if (widget.isDisabled || _currentIndex == null) {
+      return;
+    }
+    // Match the path a real pan takes: stop any in-flight return / fly-off
+    // animation so the inject sequence drives the card cleanly.
+    if (_animationController.isAnimating && _swipeType != SwipeType.swipe) {
+      _animationController.stop();
+    }
+    setState(() {
+      _cardAnimation.update(0, dy, _tappedOnTop);
+    });
+  }
+
+  void _onInjectedVerticalDragEnd(Offset velocity) {
+    if (_canSwipe) {
+      _tappedOnTop = false;
+      _onEndAnimation(velocity);
+    }
   }
 
   void _animationListener() {
@@ -264,7 +301,7 @@ class _CardSwiperState<T extends Widget> extends State<CardSwiper>
   }
 
   Future<void> _onEndAnimation(Offset velocity) async {
-    final direction = _getEndAnimationDirection();
+    final direction = _getEndAnimationDirection(velocity);
     final isValidDirection = _isValidDirection(direction);
 
     if (isValidDirection) {
@@ -286,17 +323,58 @@ class _CardSwiperState<T extends Widget> extends State<CardSwiper>
     }
   }
 
-  CardSwiperDirection _getEndAnimationDirection() {
-    if (_cardAnimation.left.abs() > widget.threshold) {
-      return _cardAnimation.left.isNegative
+  /// Decides which (if any) direction the gesture commits to on release.
+  ///
+  /// Asymmetric rule, derived from the host's UX:
+  ///
+  /// 1. **Ask-bro selected** — when the user committed vertical AND vertical
+  ///    is past the threshold AND horizontal hasn't crossed, the suggested-
+  ///    prompt indicator is showing and ask-bro wins on release.
+  ///
+  /// 2. Otherwise **horizontal commit** — like/dislike fires if horizontal
+  ///    crossed its distance threshold OR if the release velocity is a
+  ///    same-direction fling. This is reachable from either first-axis mode:
+  ///    horizontal-first commits horizontally directly; vertical-first lets
+  ///    horizontal "steal" the gesture when its threshold is crossed.
+  ///
+  /// 3. Otherwise spring back.
+  ///
+  /// No vertical fling: the indicator-visibility signal during drag is the
+  /// only way to fire ask-bro, so a fast flick that never reaches the
+  /// distance threshold deliberately won't commit.
+  CardSwiperDirection _getEndAnimationDirection(Offset velocity) {
+    const flingVelocity = kMinFlingVelocity;
+
+    final left = _cardAnimation.left;
+    final top = _cardAnimation.top;
+    final horizontalThreshold = widget.threshold;
+    final verticalThreshold = widget.verticalCommitThreshold;
+    final firstAxisIsVertical = _cardAnimation.firstAxisIsVertical;
+
+    bool flingMatches(double offset, double v) =>
+        v.abs() >= flingVelocity && offset != 0 && offset.sign == v.sign;
+
+    final horizontalCrossed =
+        left.abs() >= horizontalThreshold || flingMatches(left, velocity.dx);
+
+    // Ask-bro is only on the table when (a) the user committed vertical,
+    // (b) vertical is past its (upward) threshold, and (c) horizontal hasn't
+    // taken over. This mirrors the live indicator-visibility predicate the
+    // host renders during drag, so what the user sees is what they get.
+    final askBroSelected = (firstAxisIsVertical ?? false) &&
+        top <= -verticalThreshold &&
+        !horizontalCrossed;
+
+    if (askBroSelected) {
+      return CardSwiperDirection.top;
+    }
+
+    if (horizontalCrossed) {
+      return left.isNegative
           ? CardSwiperDirection.left
           : CardSwiperDirection.right;
     }
-    if (_cardAnimation.top.abs() > widget.threshold) {
-      return _cardAnimation.top.isNegative
-          ? CardSwiperDirection.top
-          : CardSwiperDirection.bottom;
-    }
+
     return CardSwiperDirection.none;
   }
 
